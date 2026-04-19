@@ -79,12 +79,12 @@ async function loadCompile(hexoRequire) {
  */
 async function mdxRenderer(data) {
   const { text, path: filePath } = data;
-  
+
   // Initialize dependencies Set for tracking imported component files
   if (!data.dependencies) {
     data.dependencies = new Set();
   }
-  
+
   try {
     // Ensure Babel can handle JSX/TS imports from MDX files (e.g., local components).
     ensureBabelRegister(filePath);
@@ -208,7 +208,11 @@ async function mdxRenderer(data) {
           }
 
           if (fs.existsSync(bundledPath)) {
-            component = hexoRequire(bundledPath);
+            try {
+              component = hexoRequire(bundledPath);
+            } catch (e) {
+              // Failed to load bundle, component remains null
+            }
           }
         } catch (e) {
           // esbuild bundling failed, try fallback
@@ -385,7 +389,7 @@ async function mdxRenderer(data) {
 
         const mapping = componentsForHydration.map((c, i) => `  '${c.id}': ${c.componentName}`).join(',\n');
 
-        const entrySource = `import React from 'react';\nimport { hydrateRoot } from 'react-dom/client';\n\n// Make React available globally for imported components\nwindow.React = React;\n\n${imports}\n\nconst mapping = {\n${mapping}\n};\n\nObject.keys(mapping).forEach(id => {\n  const Comp = mapping[id];\n  const el = document.querySelector('[data-mdx-component="'+id+'"]');\n  if (el) {\n    hydrateRoot(el, React.createElement(Comp, {}));\n  }\n});\n`;
+        const entrySource = `${imports}\n\nconst mapping = {\n${mapping}\n};\n\nObject.keys(mapping).forEach(id => {\n  const Comp = mapping[id];\n  const el = document.querySelector('[data-mdx-component="'+id+'"]');\n  if (el) {\n    window.ReactDOM.hydrateRoot(el, window.React.createElement(Comp, {}));\n  }\n});\n`;
 
         require('fs').mkdirSync(require('path').dirname(entryPath), { recursive: true });
         require('fs').writeFileSync(entryPath, entrySource, 'utf8');
@@ -397,19 +401,23 @@ async function mdxRenderer(data) {
           format: 'esm',
           outfile: require('path').join(outDir, outName),
           platform: 'browser',
-          jsx: 'transform',
-          jsxFactory: 'React.createElement',
-          jsxFragment: 'React.Fragment',
+          target: 'es2017',
           minify: false,
           absWorkingDir: process.cwd(),
-          loader: { '.jsx': 'jsx', '.js': 'js', '.mjs': 'js' }
+          loader: { '.jsx': 'jsx', '.js': 'js', '.mjs': 'js' },
+          jsx: 'automatic',
+          external: ['react', 'react/jsx-runtime', 'react/jsx-dev-runtime', 'react-dom', 'react-dom/server'],
+          nodePaths: [path.join(projectRoot, 'node_modules')]
         });
 
-        // Hydration bundle is placed under /assets in the public dir
-        finalHtml = `<div id="mdx-root-${hash}">${html}</div><script type="module" src="/assets/${outName}"></script>`;
+        // Hydration bundle - inject React from CDN before loading
+        finalHtml = `${html}<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>\n<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>\n<script type="module" src="/assets/${outName}"></script>`;
       } catch (err) {
-        console.error('MDX hydration bundle failed:', err.message);
+        // Hydration bundle creation failed, use plain HTML
       }
+    } else {
+      // No components for hydration, just return html
+      finalHtml = html;
     }
     
     return finalHtml;
@@ -479,7 +487,7 @@ function bundleEntryToPublic() {
         esbuild.buildSync({
           entryPoints: [entryPath],
           bundle: true,
-          format: 'iife',
+          format: 'esm',
           outfile: path.join(outDir, outName),
           platform: 'browser',
           target: 'es2017',
@@ -518,7 +526,7 @@ function bundleEntryByHash(hash) {
     esbuild.buildSync({
       entryPoints: [entryPath],
       bundle: true,
-      format: 'iife',
+      format: 'esm',
       outfile: path.join(outDir, outName),
       platform: 'browser',
       target: 'es2017',
