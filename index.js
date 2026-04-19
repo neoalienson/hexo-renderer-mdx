@@ -42,7 +42,7 @@ function ensureBabelRegister(filePath) {
         runtime: 'automatic'
       }]
     ],
-    ignore: [/node_modules/]
+    ignore: [/node_modules/, /\.esbuild-bundles\//]
   });
   babelRegistered = true;
 }
@@ -139,6 +139,8 @@ async function mdxRenderer(data) {
     const mdxReact = hexoRequire('react');
     const mdxReactDomServer = hexoRequire('react-dom/server');
     const jsxDevRuntime = hexoRequire('react/jsx-dev-runtime');
+    // Also need jsx and jsxs for automatic runtime
+    const jsxRuntime = hexoRequire('react/jsx-runtime');
     
     // Replace dynamic imports with a shim that resolves relative to the MDX file and uses require to stay in CJS.
     const toModuleNamespace = (mod) => {
@@ -174,21 +176,165 @@ async function mdxRenderer(data) {
         // ignore - will try bare require
       }
 
+      // Bundle component with esbuild to avoid React resolution issues
+      const projectRoot = hexo && hexo.base_dir ? hexo.base_dir : process.cwd();
+      const esbuildBundlesDir = path.join(projectRoot, '.esbuild-bundles');
+      fs.mkdirSync(esbuildBundlesDir, { recursive: true });
+
+      let component = null;
+      let bundledPath = null;
+
+      // Try to bundle the component using esbuild (which can handle nodePaths correctly)
+      if (fsPath && fs.existsSync(fsPath)) {
+        const bundleHash = crypto.createHash('md5').update(fsPath).digest('hex').slice(0, 8);
+        bundledPath = path.join(esbuildBundlesDir, `bundle-${bundleHash}.js`);
+
+        try {
+          // Check if we already have a bundle for this component
+          if (!fs.existsSync(bundledPath)) {
+            const esbuild = require('esbuild');
+            esbuild.buildSync({
+              entryPoints: [fsPath],
+              outfile: bundledPath,
+              bundle: true,
+              format: 'cjs',
+              platform: 'node',
+              target: 'node18',
+              nodePaths: [path.join(projectRoot, 'node_modules')],
+              absWorkingDir: path.dirname(fsPath),
+              external: ['react', 'react/jsx-dev-runtime', 'react/jsx-runtime', 'react-dom', 'react-dom/server'],
+              minify: false
+            });
+          }
+
+          if (fs.existsSync(bundledPath)) {
+            component = hexoRequire(bundledPath);
+          }
+        } catch (e) {
+          // esbuild bundling failed, try fallback
+        }
+      }
+
+      // Fallback: try to resolve from source/components/ directory with esbuild
+      if (!component) {
+        try {
+          const sourceComponentsDir = path.resolve(projectRoot, '..', 'neo01.com-source', 'components');
+          const componentName = path.basename(fsPath, path.extname(fsPath));
+          const mdxDir = path.dirname(filePath);
+          const realMdxDir = fs.realpathSync(mdxDir);
+          const resolvedFromMdx = path.resolve(realMdxDir, asString);
+
+          if (fs.existsSync(resolvedFromMdx)) {
+            const bundleHash = crypto.createHash('md5').update(resolvedFromMdx).digest('hex').slice(0, 8);
+            bundledPath = path.join(esbuildBundlesDir, `bundle-${bundleHash}.js`);
+
+            try {
+              if (!fs.existsSync(bundledPath)) {
+                const esbuild = require('esbuild');
+                esbuild.buildSync({
+                  entryPoints: [resolvedFromMdx],
+                  outfile: bundledPath,
+                  bundle: true,
+                  format: 'cjs',
+                  platform: 'node',
+                  target: 'node18',
+                  nodePaths: [path.join(projectRoot, 'node_modules')],
+                  absWorkingDir: path.dirname(resolvedFromMdx),
+                  external: ['react', 'react/jsx-dev-runtime', 'react/jsx-runtime', 'react-dom', 'react-dom/server'],
+                  minify: false
+                });
+              }
+
+              if (fs.existsSync(bundledPath)) {
+                component = hexoRequire(bundledPath);
+                fsPath = resolvedFromMdx;
+              }
+            } catch (e) {
+              // continue to next fallback
+            }
+          }
+
+          if (!component) {
+            const possibleSubdirs = fs.readdirSync(sourceComponentsDir).filter(f => {
+              try {
+                return fs.statSync(path.join(sourceComponentsDir, f)).isDirectory();
+              } catch (e) { return false; }
+            });
+            for (const subdir of possibleSubdirs) {
+              const tryPath = path.join(sourceComponentsDir, subdir, componentName + '.jsx');
+              if (fs.existsSync(tryPath)) {
+                const bundleHash = crypto.createHash('md5').update(tryPath).digest('hex').slice(0, 8);
+                bundledPath = path.join(esbuildBundlesDir, `bundle-${bundleHash}.js`);
+
+                try {
+                  if (!fs.existsSync(bundledPath)) {
+                    const esbuild = require('esbuild');
+                    esbuild.buildSync({
+                      entryPoints: [tryPath],
+                      outfile: bundledPath,
+                      bundle: true,
+                      format: 'cjs',
+                      platform: 'node',
+                      target: 'node18',
+                      nodePaths: [path.join(projectRoot, 'node_modules')],
+                      absWorkingDir: path.dirname(tryPath),
+                      external: ['react', 'react/jsx-dev-runtime', 'react/jsx-runtime', 'react-dom', 'react-dom/server'],
+                      minify: false
+                    });
+                  }
+
+                  if (fs.existsSync(bundledPath)) {
+                    component = hexoRequire(bundledPath);
+                    fsPath = tryPath;
+                    break;
+                  }
+                } catch (e) {
+                  // continue
+                }
+              }
+            }
+          }
+        } catch (e) {
+          // ignore fallback errors
+        }
+      }
+
       // Create a placeholder component for server-side rendering
       const placeholderId = `mdx-cmp-${fileHash}-${componentsForHydration.length + 1}`;
-      const Placeholder = (props) => {
-        return React.createElement('div', { 'data-mdx-component': placeholderId });
-      };
+      const ActualComponent = component ? (component.default || Object.values(component)[0]) : null;
 
       // Record mapping for hydration bundle (use filesystem path when available, otherwise the original specifier)
-      componentsForHydration.push({ id: placeholderId, spec: fsPath || asString });
+      // Store the component name for named imports
+      const componentNameForHydration = fsPath ? path.basename(fsPath, path.extname(fsPath)) : 'Component';
+      componentsForHydration.push({ id: placeholderId, spec: fsPath || asString, componentName: componentNameForHydration, bundledPath });
 
       // Register component file as a dependency so Hexo watches it for changes
       if (fsPath && data.dependencies) {
         data.dependencies.add(fsPath);
       }
 
-      // Return an ES-like namespace with default export set to placeholder
+      // MDX uses named imports like: const { CaseConverter } = await import(...)
+      // So we need to wrap the actual named export, not just provide a default
+      const componentName = fsPath ? path.basename(fsPath, path.extname(fsPath)) : 'Component';
+      const wrappedComponent = component ? (component[componentName] || component.default || Object.values(component)[0]) : null;
+
+      const Placeholder = (props) => {
+        const child = wrappedComponent ? mdxReact.createElement(wrappedComponent, props) : mdxReact.createElement('span', {}, 'LOADING...');
+        return mdxReact.createElement('div', { 'data-mdx-component': placeholderId }, [child]);
+      };
+
+      // Return object with the wrapped component as the main export (for MDX named imports)
+      // Also preserve the original component's exports
+      if (component) {
+        const result = { [componentName]: Placeholder };
+        Object.keys(component).forEach(key => {
+          if (key !== componentName && key !== 'default') {
+            result[key] = component[key];
+          }
+        });
+        result.default = Placeholder;
+        return Promise.resolve(result);
+      }
       return Promise.resolve({ default: Placeholder });
     };
 
@@ -196,13 +342,13 @@ async function mdxRenderer(data) {
     const patchedCode = code.replace(/import\(/g, 'dynamicImport(');
     const fn = new Function('jsxRuntime', 'dynamicImport', `return (async () => { ${patchedCode} })();`);
     const mdxModule = await fn(jsxDevRuntime, dynamicImport);
-    
+
     // The result has a default export which is the MDX component
     const MDXContent = mdxModule.default;
-    
+
     // Render the component to static HTML
-    const html = renderToString(
-      React.createElement(MDXContent, {})
+    const html = mdxReactDomServer.renderToString(
+      mdxReact.createElement(MDXContent, {})
     );
 
     // If there are components to hydrate, generate a client bundle using esbuild (if available)
@@ -221,8 +367,9 @@ async function mdxRenderer(data) {
         const entryPath = require('path').join(publicDir, '.hexo-mdx-entry', `mdx-entry-${hash}.mjs`);
 
         const imports = componentsForHydration.map((c, i) => {
+          // Use the bundled path for import if available
+          let importPath = c.bundledPath || c.spec;
           // Convert absolute path to relative path from entry directory
-          let importPath = c.spec;
           if (require('path').isAbsolute(importPath)) {
             importPath = require('path').relative(require('path').dirname(entryPath), importPath);
           }
@@ -232,10 +379,11 @@ async function mdxRenderer(data) {
           if (!importPath.startsWith('.')) {
             importPath = './' + importPath;
           }
-          return `import C${i} from ${JSON.stringify(importPath)};`;
+          // Use named import with the component name
+          return `import { ${c.componentName} } from ${JSON.stringify(importPath)};`;
         }).join('\n');
 
-        const mapping = componentsForHydration.map((c, i) => `  '${c.id}': C${i}`).join(',\n');
+        const mapping = componentsForHydration.map((c, i) => `  '${c.id}': ${c.componentName}`).join(',\n');
 
         const entrySource = `import React from 'react';\nimport { hydrateRoot } from 'react-dom/client';\n\n// Make React available globally for imported components\nwindow.React = React;\n\n${imports}\n\nconst mapping = {\n${mapping}\n};\n\nObject.keys(mapping).forEach(id => {\n  const Comp = mapping[id];\n  const el = document.querySelector('[data-mdx-component="'+id+'"]');\n  if (el) {\n    hydrateRoot(el, React.createElement(Comp, {}));\n  }\n});\n`;
 
@@ -326,7 +474,7 @@ function bundleEntryToPublic() {
       const entryPath = path.join(entryDir, entryFile);
       const hash = entryFile.match(/mdx-entry-([a-f0-9]+)/)?.[1] || 'unknown';
       const outName = `mdx-hydrate-${hash}.js`;
-      
+
       try {
         esbuild.buildSync({
           entryPoints: [entryPath],
@@ -338,7 +486,9 @@ function bundleEntryToPublic() {
           minify: false,
           absWorkingDir: process.cwd(),
           loader: { '.jsx': 'jsx', '.js': 'js', '.mjs': 'js' },
-          jsx: 'automatic'
+          jsx: 'automatic',
+          external: ['react', 'react/jsx-runtime', 'react/jsx-dev-runtime', 'react-dom', 'react-dom/server'],
+          nodePaths: [path.join(projectRoot, 'node_modules')]
         });
         console.log(`INFO  ✓ Bundled entry to ${path.join(outDir, outName)}`);
       } catch (err) {
@@ -375,7 +525,9 @@ function bundleEntryByHash(hash) {
       minify: false,
       absWorkingDir: process.cwd(),
       loader: { '.jsx': 'jsx', '.js': 'js', '.mjs': 'js' },
-      jsx: 'automatic'
+      jsx: 'automatic',
+      external: ['react', 'react/jsx-runtime', 'react/jsx-dev-runtime', 'react-dom', 'react-dom/server'],
+      nodePaths: [path.join(projectRoot, 'node_modules')]
     });
     console.log(`INFO  ✓ Bundled entry to ${path.join(outDir, outName)}`);
   } catch (err) {
