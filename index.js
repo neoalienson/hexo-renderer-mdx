@@ -123,7 +123,7 @@ async function mdxRenderer(data) {
     }
     
     // Compile MDX to JavaScript with automatic JSX runtime
-    // Use outputFormat: 'function-body' and development: true to avoid jsxImportSource
+    // Use outputFormat: 'function-body' and development: true to get jsxDEV calls
     // baseUrl needs trailing slash for proper relative path resolution
     const filePathDir = path.dirname(filePath);
     const compiled = await compile(content, {
