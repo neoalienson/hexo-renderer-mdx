@@ -124,10 +124,12 @@ async function mdxRenderer(data) {
     
     // Compile MDX to JavaScript with automatic JSX runtime
     // Use outputFormat: 'function-body' and development: true to avoid jsxImportSource
+    // baseUrl needs trailing slash for proper relative path resolution
+    const filePathDir = path.dirname(filePath);
     const compiled = await compile(content, {
       outputFormat: 'function-body',
       development: true,
-      baseUrl: pathToFileURL(filePath),
+      baseUrl: pathToFileURL(filePathDir + '/'),
       // remarkRehypeOptions for markdown processing
       remarkRehypeOptions: {
         allowDangerousHtml: true
@@ -158,12 +160,14 @@ async function mdxRenderer(data) {
       const req = createRequire(filePath);
 
       // Resolve a filesystem path for this specifier
+      // Use directory of filePath since _resolveDynamicMdxSpecifier uses baseUrl (directory)
+      const filePathDir = path.dirname(filePath);
       let fsPath;
       try {
         if (asString.startsWith('file://')) {
           fsPath = fileURLToPath(asString);
         } else {
-          const resolvedUrl = new URL(asString, pathToFileURL(filePath));
+          const resolvedUrl = new URL(asString, pathToFileURL(filePathDir + '/'));
           if (resolvedUrl.protocol === 'file:') {
             fsPath = fileURLToPath(resolvedUrl);
           }
