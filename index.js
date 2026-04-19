@@ -79,6 +79,9 @@ async function loadCompile(hexoRequire) {
  */
 async function mdxRenderer(data) {
   const { text, path: filePath } = data;
+  console.error('[MDX-RENDERER] mdxRenderer called for:', filePath);
+  const logPath0 = '/tmp/mdx-render.log';
+  require('fs').writeFileSync(logPath0, 'mdxRenderer called for: ' + filePath + ' text length: ' + (text ? text.length : 0) + '\n');
 
   // Initialize dependencies Set for tracking imported component files
   if (!data.dependencies) {
@@ -156,6 +159,8 @@ async function mdxRenderer(data) {
     // Collect components used so we can hydrate them client-side
     const componentsForHydration = [];
     const dynamicImport = (specifier) => {
+      const logPath3 = '/tmp/mdx-render.log';
+      require('fs').appendFileSync(logPath3, 'dynamicImport called with: ' + specifier + '\n');
       const asString = String(specifier);
       const req = createRequire(filePath);
 
@@ -310,6 +315,8 @@ async function mdxRenderer(data) {
       // Record mapping for hydration bundle (use filesystem path when available, otherwise the original specifier)
       // Store the component name for named imports
       const componentNameForHydration = fsPath ? path.basename(fsPath, path.extname(fsPath)) : 'Component';
+      const logPath2 = '/tmp/mdx-render.log';
+      require('fs').appendFileSync(logPath2, 'Adding component to hydration: ' + placeholderId + ' from ' + (fsPath || asString) + '\n');
       componentsForHydration.push({ id: placeholderId, spec: fsPath || asString, componentName: componentNameForHydration, bundledPath });
 
       // Register component file as a dependency so Hexo watches it for changes
@@ -357,7 +364,10 @@ async function mdxRenderer(data) {
 
     // If there are components to hydrate, generate a client bundle using esbuild (if available)
     let finalHtml = html;
+    console.error('[MDX] componentsForHydration.length =', componentsForHydration.length);
     if (componentsForHydration.length > 0) {
+      const logPath = '/tmp/mdx-render.log';
+      require('fs').writeFileSync(logPath, 'Starting hydration code, length=' + componentsForHydration.length + '\n');
       try {
         const esbuild = require('esbuild');
         const os = require('os');
@@ -391,11 +401,25 @@ async function mdxRenderer(data) {
         const entrySource = `${inlineCode}\n\nconst mapping = {\n${mapping}\n};\n\nObject.keys(mapping).forEach(id => {\n  const Comp = mapping[id];\n  const el = document.querySelector('[data-mdx-component="'+id+'"]');\n  if (el) {\n    window.ReactDOM.hydrateRoot(el, window.React.createElement(Comp, {}));\n  }\n});\n`;
 
         require('fs').mkdirSync(outDir, { recursive: true });
-        require('fs').writeFileSync(require('path').join(outDir, 'mdx-entry-' + hash + '.js'), entrySource, 'utf8');
+        const entryFilePath = require('path').join(outDir, 'mdx-entry-' + hash + '.js');
+        require('fs').writeFileSync(entryFilePath, entrySource, 'utf8');
+        const debugLog = (msg) => {
+          const logPath = '/tmp/mdx-debug.log';
+          require('fs').appendFileSync(logPath, `[${new Date().toISOString()}] ${msg}\n`);
+        };
+        debugLog(`Entry file size: ${entrySource.length} bytes`);
+        debugLog(`Entry file exists: ${require('fs').existsSync(entryFilePath)}`);
+        debugLog(`outDir: ${outDir}`);
+        debugLog(`entryFilePath: ${entryFilePath}`);
 
-        // Build with IIFE format using the inline code
-        esbuild.buildSync({
-          entryPoints: [require('path').join(outDir, 'mdx-entry-' + hash + '.js')],
+        debugLog('About to build hydration bundle with esbuild');
+        debugLog(`entryFilePath: ${entryFilePath}`);
+        debugLog(`outDir: ${outDir}`);
+        debugLog(`outName: ${outName}`);
+        debugLog(`react-shim path: ${require('path').resolve(__dirname, 'react-shim.js')}`);
+        debugLog(`react-shim exists: ${require('fs').existsSync(require('path').resolve(__dirname, 'react-shim.js'))}`);
+        const buildResult = esbuild.buildSync({
+          entryPoints: [entryFilePath],
           bundle: true,
           format: 'iife',
           outfile: require('path').join(outDir, outName),
@@ -405,14 +429,25 @@ async function mdxRenderer(data) {
           absWorkingDir: outDir,
           loader: { '.jsx': 'jsx', '.js': 'js', '.mjs': 'js' },
           jsx: 'automatic',
-          inject: [require('path').join(__dirname, 'react-shim.js')],
+          alias: {
+            'react': require('path').resolve(__dirname, 'react-shim.js'),
+            'react/jsx-runtime': require('path').resolve(__dirname, 'react-jsx-runtime-shim.js')
+          },
           define: {
             'process.env.NODE_ENV': '"production"'
           }
         });
+        console.error('[MDX] esbuild build completed');
+          const outFile = require('path').join(outDir, outName);
+          console.error('[MDX] Output file exists:', require('fs').existsSync(outFile));
+          if (require('fs').existsSync(outFile)) {
+            console.error('[MDX] Output file size:', require('fs').statSync(outFile).size);
+          } else {
+            console.error('[MDX] ERROR: Output file was not created!');
+          }
 
         // Hydration bundle - React from global CDN
-        finalHtml = `${html}<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>\n<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>\n<script src="/assets/${outName}"></script>`;
+        finalHtml = `${html}<script src="https://unpkg.com/react@18/umd/react.development.js"></script>\n<script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>\n<script src="/assets/${outName}"></script>`;
       } catch (err) {
         console.error('Hydration bundle failed:', err.message);
         console.error(err.stack);
@@ -422,7 +457,6 @@ async function mdxRenderer(data) {
       // No components for hydration, just return html
       finalHtml = html;
     }
-    
     return finalHtml;
   } catch (err) {
     // Provide more detailed error information
@@ -594,6 +628,7 @@ async function mdxRendererWithTracking(data) {
 hexo.extend.renderer.register('mdx', 'html', mdxRendererWithTracking, {
   disableNunjucks: true
 });
+console.error('[HEXO-MDX] Renderer registered for .mdx files');
 
 /**
  * Watch component files and trigger full site regeneration when they change
