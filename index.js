@@ -335,7 +335,8 @@ function bundleEntryToPublic() {
           target: 'es2017',
           minify: false,
           absWorkingDir: process.cwd(),
-          loader: { '.jsx': 'jsx', '.js': 'js', '.mjs': 'js' }
+          loader: { '.jsx': 'jsx', '.js': 'js', '.mjs': 'js' },
+          jsx: 'automatic'
         });
         console.log(`INFO  ✓ Bundled entry to ${path.join(outDir, outName)}`);
       } catch (err) {
@@ -371,7 +372,8 @@ function bundleEntryByHash(hash) {
       target: 'es2017',
       minify: false,
       absWorkingDir: process.cwd(),
-      loader: { '.jsx': 'jsx', '.js': 'js', '.mjs': 'js' }
+      loader: { '.jsx': 'jsx', '.js': 'js', '.mjs': 'js' },
+      jsx: 'automatic'
     });
     console.log(`INFO  ✓ Bundled entry to ${path.join(outDir, outName)}`);
   } catch (err) {
