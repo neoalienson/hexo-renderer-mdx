@@ -7,6 +7,13 @@ const { createRequire } = require('module');
 const { pathToFileURL, fileURLToPath } = require('url');
 const crypto = require('crypto');
 
+// Set NODE_PATH to include hexo-blog/node_modules so modules can be resolved from source directories
+// Using __dirname which is /home/neo/projects/neo01.com/hexo-blog/node_modules/hexo-renderer-mdx
+// So ../../node_modules resolves to /home/neo/projects/neo01.com/hexo-blog/node_modules
+const hexoNodeModules = __dirname + '/../../node_modules';
+process.env.NODE_PATH = hexoNodeModules;
+require('module').Module._initPaths();
+
 let babelRegistered = false;
 function ensureBabelRegister(filePath) {
   if (babelRegistered) return;
@@ -25,7 +32,11 @@ function ensureBabelRegister(filePath) {
   }
   babelRegister({
     extensions: ['.js', '.jsx', '.ts', '.tsx'],
+    presets: [
+      '@babel/preset-typescript'
+    ],
     plugins: [
+      '@babel/plugin-transform-modules-commonjs',
       '@babel/plugin-syntax-dynamic-import',
       ['@babel/plugin-transform-react-jsx', {
         runtime: 'automatic'
@@ -40,31 +51,11 @@ function ensureBabelRegister(filePath) {
 let compile;
 let compileLoaded = false;
 
-async function loadCompile() {
+async function loadCompile(hexoRequire) {
   if (!compileLoaded) {
     try {
-      // Try to load @mdx-js/mdx - it may be CJS or ESM depending on the environment
-      try {
-        // First try: dynamic import with proper error handling
-        const mdxModule = await (async () => {
-          try {
-            return await import('@mdx-js/mdx');
-          } catch (err) {
-            // If dynamic import fails, this might be a require context issue
-            // Return null to trigger fallback
-            return null;
-          }
-        })();
-        
-        if (mdxModule) {
-          compile = mdxModule.compile;
-        } else {
-          throw new Error('Could not load @mdx-js/mdx via dynamic import');
-        }
-      } catch (err) {
-        // Fallback: try to require it directly (in case it's been transpiled)
-        compile = require('@mdx-js/mdx').compile;
-      }
+      // Use synchronous require since Babel is already registered
+      compile = hexoRequire('@mdx-js/mdx').compile;
       compileLoaded = true;
     } catch (err) {
       throw new Error(`Failed to load @mdx-js/mdx: ${err.message}`);
@@ -98,8 +89,12 @@ async function mdxRenderer(data) {
     // Ensure Babel can handle JSX/TS imports from MDX files (e.g., local components).
     ensureBabelRegister(filePath);
 
-    // Ensure compile function is loaded
-    await loadCompile();
+    // Use createRequire with the Hexo bin file so node_modules can be resolved from project root
+    const hexoBinPath = path.join(hexo && hexo.base_dir ? hexo.base_dir : process.cwd(), 'node_modules/hexo/bin/hexo');
+    const hexoRequire = createRequire(hexoBinPath);
+
+    // Ensure compile function is loaded (uses hexoRequire)
+    await loadCompile(hexoRequire);
 
     // Stable per-file hash to namespace hydration ids and bundles
     const fileHash = crypto.createHash('md5').update(filePath).digest('hex').slice(0, 8);
@@ -140,7 +135,10 @@ async function mdxRenderer(data) {
     const code = String(compiled);
     
     // When development: true, the compiled code uses jsxDEV from react/jsx-dev-runtime
-    const jsxDevRuntime = require('react/jsx-dev-runtime');
+    // Use hexo-renderer-mdx's bundled React to avoid version mismatches
+    const mdxReact = hexoRequire('react');
+    const mdxReactDomServer = hexoRequire('react-dom/server');
+    const jsxDevRuntime = hexoRequire('react/jsx-dev-runtime');
     
     // Replace dynamic imports with a shim that resolves relative to the MDX file and uses require to stay in CJS.
     const toModuleNamespace = (mod) => {
@@ -159,18 +157,18 @@ async function mdxRenderer(data) {
       const asString = String(specifier);
       const req = createRequire(filePath);
 
+      // Resolve symlinks in filePath to get the real source directory path
+      const realFilePath = fs.realpathSync(filePath);
+      const realMdxDir = path.dirname(realFilePath);
+
       // Resolve a filesystem path for this specifier
-      // Use directory of filePath since _resolveDynamicMdxSpecifier uses baseUrl (directory)
-      const filePathDir = path.dirname(filePath);
       let fsPath;
       try {
         if (asString.startsWith('file://')) {
-          fsPath = fileURLToPath(asString);
+          fsPath = path.normalize(fileURLToPath(asString));
         } else {
-          const resolvedUrl = new URL(asString, pathToFileURL(filePathDir + '/'));
-          if (resolvedUrl.protocol === 'file:') {
-            fsPath = fileURLToPath(resolvedUrl);
-          }
+          // For relative imports, use path.resolve (not URL resolution) to handle symlinks correctly
+          fsPath = path.resolve(realMdxDir, asString);
         }
       } catch (e) {
         // ignore - will try bare require
