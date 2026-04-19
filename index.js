@@ -197,9 +197,9 @@ async function mdxRenderer(data) {
               entryPoints: [fsPath],
               outfile: bundledPath,
               bundle: true,
-              format: 'cjs',
-              platform: 'node',
-              target: 'node18',
+              format: 'esm',
+              platform: 'browser',
+              target: 'es2017',
               nodePaths: [path.join(projectRoot, 'node_modules')],
               absWorkingDir: path.dirname(fsPath),
               external: ['react', 'react/jsx-dev-runtime', 'react/jsx-runtime', 'react-dom', 'react-dom/server'],
@@ -239,9 +239,9 @@ async function mdxRenderer(data) {
                   entryPoints: [resolvedFromMdx],
                   outfile: bundledPath,
                   bundle: true,
-                  format: 'cjs',
-                  platform: 'node',
-                  target: 'node18',
+                  format: 'esm',
+                  platform: 'browser',
+                  target: 'es2017',
                   nodePaths: [path.join(projectRoot, 'node_modules')],
                   absWorkingDir: path.dirname(resolvedFromMdx),
                   external: ['react', 'react/jsx-dev-runtime', 'react/jsx-runtime', 'react-dom', 'react-dom/server'],
@@ -277,9 +277,9 @@ async function mdxRenderer(data) {
                       entryPoints: [tryPath],
                       outfile: bundledPath,
                       bundle: true,
-                      format: 'cjs',
-                      platform: 'node',
-                      target: 'node18',
+                      format: 'esm',
+                      platform: 'browser',
+                      target: 'es2017',
                       nodePaths: [path.join(projectRoot, 'node_modules')],
                       absWorkingDir: path.dirname(tryPath),
                       external: ['react', 'react/jsx-dev-runtime', 'react/jsx-runtime', 'react-dom', 'react-dom/server'],
@@ -370,49 +370,52 @@ async function mdxRenderer(data) {
         const outDir = require('path').join(publicDir, 'assets');
         const entryPath = require('path').join(publicDir, '.hexo-mdx-entry', `mdx-entry-${hash}.mjs`);
 
-        const imports = componentsForHydration.map((c, i) => {
-          // Use the bundled path for import if available
-          let importPath = c.bundledPath || c.spec;
-          // Convert absolute path to relative path from entry directory
-          if (require('path').isAbsolute(importPath)) {
-            importPath = require('path').relative(require('path').dirname(entryPath), importPath);
-          }
-          // Normalize slashes for JS import
-          importPath = importPath.replace(/\\/g, '/');
-          // Ensure relative imports start with ./ or ../
-          if (!importPath.startsWith('.')) {
-            importPath = './' + importPath;
-          }
-          // Use named import with the component name
-          return `import { ${c.componentName} } from ${JSON.stringify(importPath)};`;
-        }).join('\n');
-
+        // Read bundled files and inline them
         const mapping = componentsForHydration.map((c, i) => `  '${c.id}': ${c.componentName}`).join(',\n');
 
-        const entrySource = `${imports}\n\nconst mapping = {\n${mapping}\n};\n\nObject.keys(mapping).forEach(id => {\n  const Comp = mapping[id];\n  const el = document.querySelector('[data-mdx-component="'+id+'"]');\n  if (el) {\n    window.ReactDOM.hydrateRoot(el, window.React.createElement(Comp, {}));\n  }\n});\n`;
+        const inlineCode = componentsForHydration.map((c) => {
+          const bundledPath = c.bundledPath;
+          if (bundledPath && require('fs').existsSync(bundledPath)) {
+            try {
+              let content = require('fs').readFileSync(bundledPath, 'utf8');
+              // Remove the module.exports wrapper since we're inlining
+              // The CJS bundle exports the component, we need to access it
+              return content;
+            } catch (e) {
+              return '';
+            }
+          }
+          return '';
+        }).join('\n\n');
 
-        require('fs').mkdirSync(require('path').dirname(entryPath), { recursive: true });
-        require('fs').writeFileSync(entryPath, entrySource, 'utf8');
+        const entrySource = `${inlineCode}\n\nconst mapping = {\n${mapping}\n};\n\nObject.keys(mapping).forEach(id => {\n  const Comp = mapping[id];\n  const el = document.querySelector('[data-mdx-component="'+id+'"]');\n  if (el) {\n    window.ReactDOM.hydrateRoot(el, window.React.createElement(Comp, {}));\n  }\n});\n`;
+
         require('fs').mkdirSync(outDir, { recursive: true });
+        require('fs').writeFileSync(require('path').join(outDir, 'mdx-entry-' + hash + '.js'), entrySource, 'utf8');
 
+        // Build with IIFE format using the inline code
         esbuild.buildSync({
-          entryPoints: [entryPath],
+          entryPoints: [require('path').join(outDir, 'mdx-entry-' + hash + '.js')],
           bundle: true,
-          format: 'esm',
+          format: 'iife',
           outfile: require('path').join(outDir, outName),
           platform: 'browser',
           target: 'es2017',
           minify: false,
-          absWorkingDir: process.cwd(),
+          absWorkingDir: outDir,
           loader: { '.jsx': 'jsx', '.js': 'js', '.mjs': 'js' },
           jsx: 'automatic',
-          external: ['react', 'react/jsx-runtime', 'react/jsx-dev-runtime', 'react-dom', 'react-dom/server'],
-          nodePaths: [path.join(projectRoot, 'node_modules')]
+          inject: [require('path').join(__dirname, 'react-shim.js')],
+          define: {
+            'process.env.NODE_ENV': '"production"'
+          }
         });
 
-        // Hydration bundle - inject React from CDN before loading
-        finalHtml = `${html}<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>\n<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>\n<script type="module" src="/assets/${outName}"></script>`;
+        // Hydration bundle - React from global CDN
+        finalHtml = `${html}<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>\n<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>\n<script src="/assets/${outName}"></script>`;
       } catch (err) {
+        console.error('Hydration bundle failed:', err.message);
+        console.error(err.stack);
         // Hydration bundle creation failed, use plain HTML
       }
     } else {
